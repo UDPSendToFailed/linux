@@ -4,8 +4,39 @@
  *
  * Copyright (c) 2025 Collabora Ltd.
  *                    AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+ *
+ * HX8279 Implementation Notes
+ * ===========================
+ *
+ * DSI Command Format:
+ *   The HX8279 uses DCS-typed DSI writes (data type 0x15 for short, 0x39 for
+ *   long) rather than Generic-typed writes (0x13/0x29) for all vendor register
+ *   access, despite registers being in vendor-specific address space (0xB0+).
+ *
+ * GOA (Gate driver On Array) Mux Sentinel:
+ *   Some panels do not program all 20 GOA mux positions per side. The HX8279
+ *   has non-zero silicon defaults for unwritten GOA mux registers (e.g. C6/C7
+ *   default to 0x16, CE defaults to 0x15). Writing 0x00 to these positions
+ *   incorrectly ties gate outputs to signal 0, causing gate-line contention
+ *   and severe vertical smearing artifacts ("barcode" pattern).
+ *
+ *   To handle this, the value 0xff is used as a sentinel in gout_l[]/gout_r[]
+ *   and goa_odd_timing[]/goa_even_timing[] arrays. The write loops skip any
+ *   entry set to 0xff, preserving the IC's power-on defaults. Panels that
+ *   program all positions (e.g. aoly, startek) use real values for every entry.
+ *
+ * Backlight:
+ *   The HX8279 controls backlight brightness via vendor Page 4 register 0xB8,
+ *   not the standard DCS command 0x51 (set_display_brightness).
+ *
+ * Power Sequencing:
+ *   The HX8279 does not use standard DCS sleep/display commands. There is no
+ *   exit_sleep_mode (0x11), display_on (0x29), enter_sleep_mode (0x10), or
+ *   display_off (0x28). The panel activates implicitly after vendor register
+ *   init followed by video data. Display off uses vendor Page 0 reg 0xB2=0x00.
  */
 
+#include <linux/backlight.h>
 #include <linux/bitfield.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
@@ -25,10 +56,14 @@
  #define HX8279_PAGE_SEL		GENMASK(3, 0)
 
 /* Page 0 - Driver/Module Configuration */
+#define HX8279_P0_DSI_CFG		0xb6
+#define HX8279_P0_PANEL_SETTING		0xba
 #define HX8279_P0_VGHS			0xbf
 #define HX8279_P0_VGLS			0xc0
 #define HX8279_P0_VGPHS			0xc2
+#define HX8279_P0_VGPLS			0xc3
 #define HX8279_P0_VGNHS			0xc4
+#define HX8279_P0_VGNLS			0xc5
  #define HX8279_P0_VG_SEL		GENMASK(4, 0)
  #define HX8279_VGH_MIN_MV		8700
  #define HX8279_VGH_STEP_MV		300
@@ -128,6 +163,7 @@ struct hx8279_panel_mode {
 	const struct drm_display_mode mode;
 	u8 bpc;
 	bool is_video_mode;
+	bool is_video_burst_mode;
 };
 
 /**
@@ -195,10 +231,14 @@ struct hx8279_panel_desc {
 	u8 num_modes;
 
 	/* Page 0 */
+	u8 dsi_cfg;
+	u8 panel_setting;
 	unsigned int vgh_mv;
 	unsigned int vgl_mv;
 	unsigned int vgph_mv;
+	unsigned int vgpls;
 	unsigned int vgnh_mv;
+	unsigned int vgnls;
 
 	/* Page 1 */
 	const struct hx8279_goa_mux *gmux;
@@ -253,7 +293,7 @@ static void hx8279_set_page(struct hx8279 *hx,
 	if (hx->last_page == page)
 		return;
 
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_page, ARRAY_SIZE(cmd_set_page));
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_page, ARRAY_SIZE(cmd_set_page));
 	if (!dsi_ctx->accum_err)
 		hx->last_page = page;
 }
@@ -270,31 +310,59 @@ static void hx8279_set_module_config(struct hx8279 *hx,
 	/* Page 0 - Driver/Module Configuration */
 	hx8279_set_page(hx, dsi_ctx, 0);
 
+	if (desc->dsi_cfg) {
+		cmd_set_voltage[0] = HX8279_P0_DSI_CFG;
+		cmd_set_voltage[1] = desc->dsi_cfg;
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
+					     ARRAY_SIZE(cmd_set_voltage));
+	}
+
+	if (desc->panel_setting) {
+		cmd_set_voltage[0] = HX8279_P0_PANEL_SETTING;
+		cmd_set_voltage[1] = desc->panel_setting;
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
+					     ARRAY_SIZE(cmd_set_voltage));
+	}
+
 	if (desc->vgh_mv) {
 		cmd_set_voltage[0] = HX8279_P0_VGHS;
 		cmd_set_voltage[1] = HX8279_VGH_VOLT_SEL(desc->vgh_mv);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_voltage,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
 					     ARRAY_SIZE(cmd_set_voltage));
 	}
 
 	if (desc->vgl_mv) {
 		cmd_set_voltage[0] = HX8279_P0_VGLS;
 		cmd_set_voltage[1] = HX8279_VGL_VOLT_SEL(desc->vgl_mv);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_voltage,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
 					     ARRAY_SIZE(cmd_set_voltage));
 	}
 
 	if (desc->vgph_mv) {
 		cmd_set_voltage[0] = HX8279_P0_VGPHS;
 		cmd_set_voltage[1] = HX8279_VGPN_VOLT_SEL(desc->vgph_mv);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_voltage,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
+					     ARRAY_SIZE(cmd_set_voltage));
+	}
+
+	if (desc->vgpls) {
+		cmd_set_voltage[0] = HX8279_P0_VGPLS;
+		cmd_set_voltage[1] = desc->vgpls;
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
 					     ARRAY_SIZE(cmd_set_voltage));
 	}
 
 	if (desc->vgnh_mv) {
 		cmd_set_voltage[0] = HX8279_P0_VGNHS;
 		cmd_set_voltage[1] = HX8279_VGPN_VOLT_SEL(desc->vgnh_mv);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_voltage,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
+					     ARRAY_SIZE(cmd_set_voltage));
+	}
+
+	if (desc->vgnls) {
+		cmd_set_voltage[0] = HX8279_P0_VGNLS;
+		cmd_set_voltage[1] = desc->vgnls;
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_voltage,
 					     ARRAY_SIZE(cmd_set_voltage));
 	}
 }
@@ -311,17 +379,25 @@ static void hx8279_set_gmux(struct hx8279 *hx,
 
 	hx8279_set_page(hx, dsi_ctx, 1);
 
+	/*
+	 * Skip entries marked 0xff — these GOA mux positions must retain
+	 * the IC’s power-on defaults.  See file header for details.
+	 */
 	for (i = 0; i < ARRAY_SIZE(gmux->gout_l); i++) {
+		if (gmux->gout_l[i] == 0xff)
+			continue;
 		cmd_set_gmux[0] = HX8279_P1_REG_GOUTL(i);
 		cmd_set_gmux[1] = gmux->gout_l[i];
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_gmux,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_gmux,
 					     ARRAY_SIZE(cmd_set_gmux));
 	}
 
 	for (i = 0; i < ARRAY_SIZE(gmux->gout_r); i++) {
+		if (gmux->gout_r[i] == 0xff)
+			continue;
 		cmd_set_gmux[0] = HX8279_P1_REG_GOUTR(i);
 		cmd_set_gmux[1] = gmux->gout_r[i];
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_gmux,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_gmux,
 					     ARRAY_SIZE(cmd_set_gmux));
 	}
 }
@@ -341,14 +417,14 @@ static void hx8279_set_analog_gamma(struct hx8279 *hx,
 	for (i = 0; i < ARRAY_SIZE(agamma->pos); i++) {
 		cmd_set_ana_gamma[0] = HX8279_P2_REG_GAMMA_T_PVP(i);
 		cmd_set_ana_gamma[1] = agamma->pos[i];
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_ana_gamma,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_ana_gamma,
 					     ARRAY_SIZE(cmd_set_ana_gamma));
 	}
 
 	for (i = 0; i < ARRAY_SIZE(agamma->neg); i++) {
 		cmd_set_ana_gamma[0] = HX8279_P2_REG_GAMMA_T_PVN(i);
 		cmd_set_ana_gamma[1] = agamma->neg[i];
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_ana_gamma,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_ana_gamma,
 					     ARRAY_SIZE(cmd_set_ana_gamma));
 	}
 }
@@ -365,17 +441,22 @@ static void hx8279_set_goa_timing(struct hx8279 *hx,
 
 	hx8279_set_page(hx, dsi_ctx, 3);
 
+	/* Skip 0xff sentinel entries — see file header for the rationale. */
 	for (i = 0; i < ARRAY_SIZE(desc->goa_odd_timing); i++) {
+		if (desc->goa_odd_timing[i] == 0xff)
+			continue;
 		cmd_set_goa_t[0] = HX8279_P3_REG_GOA_TO(i);
 		cmd_set_goa_t[1] = desc->goa_odd_timing[i];
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa_t,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa_t,
 					     ARRAY_SIZE(cmd_set_goa_t));
 	}
 
 	for (i = 0; i < ARRAY_SIZE(desc->goa_even_timing); i++) {
+		if (desc->goa_even_timing[i] == 0xff)
+			continue;
 		cmd_set_goa_t[0] = HX8279_P3_REG_GOA_TE(i);
-		cmd_set_goa_t[1] = desc->goa_odd_timing[i];
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa_t,
+		cmd_set_goa_t[1] = desc->goa_even_timing[i];
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa_t,
 					     ARRAY_SIZE(cmd_set_goa_t));
 	}
 }
@@ -395,7 +476,7 @@ static void hx8279_set_goa_cfg(struct hx8279 *hx,
 	if (desc->goa_unk_ba)  {
 		cmd_set_goa[0] = HX8279_P3_REG_UNKNOWN_BA;
 		cmd_set_goa[1] = desc->goa_unk_ba;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
@@ -403,7 +484,7 @@ static void hx8279_set_goa_cfg(struct hx8279 *hx,
 		cmd_set_goa[0] = HX8279_P3_REG_GOA_STVL;
 		cmd_set_goa[1] = FIELD_PREP(HX8279_P3_GOA_STV_LEAD,
 					    desc->goa_stv_lead_time_ck);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
@@ -411,7 +492,7 @@ static void hx8279_set_goa_cfg(struct hx8279 *hx,
 		cmd_set_goa[0] = HX8279_P3_REG_GOA_CKVL;
 		cmd_set_goa[1] = FIELD_PREP(HX8279_P3_GOA_CKV_DUMMY,
 					    desc->goa_ckv_lead_time_ck);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
@@ -423,7 +504,7 @@ static void hx8279_set_goa_cfg(struct hx8279 *hx,
 					     desc->goa_ckv_non_overlap_ctl);
 		/* RESERVED must be always set */
 		cmd_set_goa[1] |= HX8279_P3_GOA_CKV_RESERVED;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
@@ -434,26 +515,26 @@ static void hx8279_set_goa_cfg(struct hx8279 *hx,
 	if (desc->goa_ckv_rise_precharge || desc->goa_ckv_fall_precharge) {
 		cmd_set_goa[0] = HX8279_P3_REG_GOA_CKV_RISE_PREC;
 		cmd_set_goa[1] = desc->goa_ckv_rise_precharge;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 
 		cmd_set_goa[0] = HX8279_P3_REG_GOA_CKV_FALL_PREC;
 		cmd_set_goa[1] = desc->goa_ckv_fall_precharge;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
 	if (desc->goa_clr1_width_adj) {
 		cmd_set_goa[0] = HX8279_P3_REG_GOA_CLR1_W_ADJ;
 		cmd_set_goa[1] = desc->goa_clr1_width_adj;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
 	if (desc->goa_clr234_width_adj) {
 		cmd_set_goa[0] = HX8279_P3_REG_GOA_CLR234_W_ADJ;
 		cmd_set_goa[1] = desc->goa_clr234_width_adj;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
@@ -467,20 +548,20 @@ static void hx8279_set_goa_cfg(struct hx8279 *hx,
 					    desc->goa_clr_start_pos[i]);
 		cmd_set_goa[1] |= FIELD_PREP(HX8279_P3_GOA_CLR_CFG_POLARITY,
 					     desc->goa_clr_polarity[i]);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
 	if (desc->goa_unk_e4) {
 		cmd_set_goa[0] = HX8279_P3_REG_UNKNOWN_E4;
 		cmd_set_goa[1] = desc->goa_unk_e4;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 					     ARRAY_SIZE(cmd_set_goa));
 	}
 
 	cmd_set_goa[0] = HX8279_P3_REG_UNKNOWN_E5;
 	cmd_set_goa[1] = desc->goa_unk_e5;
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_goa,
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_goa,
 				     ARRAY_SIZE(cmd_set_goa));
 }
 
@@ -502,28 +583,28 @@ static void hx8279_set_mipi_cfg(struct hx8279 *hx,
 					      desc->ths_settle_time);
 		cmd_set_mipi[1] |= FIELD_PREP(HX8279_P5_TIMING_LHS_SETTLE,
 					      desc->lhs_settle_time_by_osc25);
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_mipi,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_mipi,
 					     ARRAY_SIZE(cmd_set_mipi));
 	}
 
 	if (desc->timing_unk_b8) {
 		cmd_set_mipi[0] = HX8279_P5_REG_UNKNOWN_B8;
 		cmd_set_mipi[1] = desc->timing_unk_b8;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_mipi,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_mipi,
 					     ARRAY_SIZE(cmd_set_mipi));
 	}
 
 	if (desc->timing_unk_bc) {
 		cmd_set_mipi[0] = HX8279_P5_REG_UNKNOWN_BC;
 		cmd_set_mipi[1] = desc->timing_unk_bc;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_mipi,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_mipi,
 					     ARRAY_SIZE(cmd_set_mipi));
 	}
 
 	if (desc->timing_unk_d6) {
 		cmd_set_mipi[0] = HX8279_P5_REG_UNKNOWN_D6;
 		cmd_set_mipi[1] = desc->timing_unk_d6;
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_mipi,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_mipi,
 					     ARRAY_SIZE(cmd_set_mipi));
 	}
 }
@@ -543,31 +624,31 @@ static void hx8279_set_adv_cfg(struct hx8279 *hx,
 	hx8279_set_page(hx, dsi_ctx, 6);
 
 	/* Unlock ENG settings: write same word to both ENGINEER_PWD and INHOUSE_FUNC */
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
 
 	cmd_set_eng[0] = HX8279_P6_REG_INHOUSE_FUNC;
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
 
 	/* Set Gamma Chopper and Gamma buffer Chopper control */
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_gamma, ARRAY_SIZE(cmd_set_gamma));
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_gamma, ARRAY_SIZE(cmd_set_gamma));
 
 	/* Set Source delay time adjustment (CKV falling to Source off) */
 	if (desc->src_delay_time_adj_ck)
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_dly,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_dly,
 					     ARRAY_SIZE(cmd_set_dly));
 
 	/* Set voltage adjustment */
 	if (desc->volt_adj)
-		mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_volt_adj,
+		mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_volt_adj,
 					     ARRAY_SIZE(cmd_set_volt_adj));
 
 	/* Lock ENG settings again */
 	cmd_set_eng[0] = HX8279_P6_REG_ENGINEER_PWD;
 	cmd_set_eng[1] = 0;
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
 
 	cmd_set_eng[0] = HX8279_P6_REG_INHOUSE_FUNC;
-	mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
+	mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_eng, ARRAY_SIZE(cmd_set_eng));
 }
 
 static void hx8279_set_digital_gamma(struct hx8279 *hx,
@@ -575,7 +656,7 @@ static void hx8279_set_digital_gamma(struct hx8279 *hx,
 {
 	const struct hx8279_digital_gamma *dgamma = hx->desc->dgamma;
 	u8 cmd_set_dig_gamma[2];
-	int i;
+	int i, pn;
 
 	if (!dgamma)
 		return;
@@ -585,15 +666,15 @@ static void hx8279_set_digital_gamma(struct hx8279 *hx,
 	 * The first iteration sets all positive component registers,
 	 * the second one sets all negatives.
 	 */
-	for (i = 0; i < 2; i++) {
-		u8 pg_neg = i * 3;
+	for (pn = 0; pn < 2; pn++) {
+		u8 pg_neg = pn * 3;
 
 		hx8279_set_page(hx, dsi_ctx, 7 + pg_neg);
 
 		for (i = 0; i < ARRAY_SIZE(dgamma->r); i++) {
 			cmd_set_dig_gamma[0] = HX8279_PG_DIGITAL_GAMMA + i;
 			cmd_set_dig_gamma[1] = dgamma->r[i];
-			mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_dig_gamma,
+			mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_dig_gamma,
 						     ARRAY_SIZE(cmd_set_dig_gamma));
 		}
 
@@ -602,7 +683,7 @@ static void hx8279_set_digital_gamma(struct hx8279 *hx,
 		for (i = 0; i < ARRAY_SIZE(dgamma->g); i++) {
 			cmd_set_dig_gamma[0] = HX8279_PG_DIGITAL_GAMMA + i;
 			cmd_set_dig_gamma[1] = dgamma->g[i];
-			mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_dig_gamma,
+			mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_dig_gamma,
 						     ARRAY_SIZE(cmd_set_dig_gamma));
 		}
 
@@ -611,7 +692,7 @@ static void hx8279_set_digital_gamma(struct hx8279 *hx,
 		for (i = 0; i < ARRAY_SIZE(dgamma->b); i++) {
 			cmd_set_dig_gamma[0] = HX8279_PG_DIGITAL_GAMMA + i;
 			cmd_set_dig_gamma[1] = dgamma->b[i];
-			mipi_dsi_generic_write_multi(dsi_ctx, cmd_set_dig_gamma,
+			mipi_dsi_dcs_write_buffer_multi(dsi_ctx, cmd_set_dig_gamma,
 						     ARRAY_SIZE(cmd_set_dig_gamma));
 		}
 	}
@@ -622,26 +703,38 @@ static int hx8279_on(struct hx8279 *hx)
 	struct mipi_dsi_device *dsi = hx->dsi[0];
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 
-	/* Page 5 */
-	hx8279_set_mipi_cfg(hx, &dsi_ctx);
-
-	/* Page 1 */
+	/* Page 1 - GOA MUX (matches downstream order) */
 	hx8279_set_gmux(hx, &dsi_ctx);
 
-	/* Page 2 */
-	hx8279_set_analog_gamma(hx, &dsi_ctx);
-
-	/* Page 3 */
+	/* Page 3 - GOA timing + config */
 	hx8279_set_goa_cfg(hx, &dsi_ctx);
 	hx8279_set_goa_timing(hx, &dsi_ctx);
 
 	/* Page 0 - Driver/Module Configuration */
 	hx8279_set_module_config(hx, &dsi_ctx);
 
-	/* Page 6 */
+	/* Page 2 - Analog Gamma */
+	hx8279_set_analog_gamma(hx, &dsi_ctx);
+
+	/* Page 4 - PWM/CABC Configuration */
+	hx8279_set_page(hx, &dsi_ctx, 4);
+	{
+		const u8 cmd_cabc_mode[] = { 0xb5, 0x02 };
+		const u8 cmd_cabc_cfg[] = { 0xb6, 0x02 };
+
+		mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, cmd_cabc_mode,
+					     ARRAY_SIZE(cmd_cabc_mode));
+		mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, cmd_cabc_cfg,
+					     ARRAY_SIZE(cmd_cabc_cfg));
+	}
+
+	/* Page 5 - MIPI Configuration */
+	hx8279_set_mipi_cfg(hx, &dsi_ctx);
+
+	/* Page 6 - Advanced/ENG Configuration */
 	hx8279_set_adv_cfg(hx, &dsi_ctx);
 
-	/* Pages 7..12 */
+	/* Pages 7..12 - Digital Gamma */
 	hx8279_set_digital_gamma(hx, &dsi_ctx);
 
 	return dsi_ctx.accum_err;
@@ -661,18 +754,24 @@ static int hx8279_disable(struct drm_panel *panel)
 	struct mipi_dsi_device *dsi = hx->dsi[0];
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 
-	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
+	/* Vendor-specific display off: page 0, reg B2=0x00 (no standard DCS display_off) */
+	hx8279_set_page(hx, &dsi_ctx, 0);
+	{
+		const u8 cmd_off[] = { 0xb2, 0x00 };
+		mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, cmd_off, sizeof(cmd_off));
+	}
+	mipi_dsi_msleep(&dsi_ctx, 100);
 
 	return 0;
 }
 
 static int hx8279_enable(struct drm_panel *panel)
 {
-	struct hx8279 *hx = to_hx8279(panel);
-	struct mipi_dsi_device *dsi = hx->dsi[0];
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
-
-	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
+	/*
+	 * HX8279 does not use standard DCS display_on (0x29). The panel
+	 * turns on implicitly once vendor register init completes and
+	 * the DSI host begins transmitting video data.
+	 */
 
 	return 0;
 }
@@ -681,7 +780,6 @@ static int hx8279_prepare(struct drm_panel *panel)
 {
 	struct hx8279 *hx = to_hx8279(panel);
 	struct mipi_dsi_device *dsi = hx->dsi[0];
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 	int ret;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(hx->vregs), hx->vregs);
@@ -690,8 +788,16 @@ static int hx8279_prepare(struct drm_panel *panel)
 
 	gpiod_set_value_cansleep(hx->enable_gpio, 1);
 	usleep_range(5000, 6000);
+
+	/*
+	 * Reset: pulse LOW 7ms then HIGH 7ms. The reset line may already
+	 * be high from pinctrl defaults or bootloader, so we must drive it
+	 * LOW first to ensure a clean hardware reset of the panel IC.
+	 */
+	gpiod_set_value_cansleep(hx->reset_gpio, 0);
+	usleep_range(7000, 8000);
 	gpiod_set_value_cansleep(hx->reset_gpio, 1);
-	usleep_range(6000, 7000);
+	usleep_range(7000, 8000);
 
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 	if (hx->dsi[1])
@@ -703,28 +809,29 @@ static int hx8279_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
-	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 130);
+	/*
+	 * HX8279 does not use standard DCS exit_sleep_mode (0x11) or
+	 * display_on (0x29). Allow 100ms for the panel to stabilize
+	 * after vendor register init before video data starts flowing.
+	 */
+	msleep(100);
 
-	return dsi_ctx.accum_err;
+	return 0;
 }
 
 static int hx8279_unprepare(struct drm_panel *panel)
 {
 	struct hx8279 *hx = to_hx8279(panel);
 	struct mipi_dsi_device *dsi = hx->dsi[0];
-	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
 
-	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
-	mipi_dsi_msleep(&dsi_ctx, 130);
-
+	/* HX8279 does not use DCS enter_sleep_mode — power off directly */
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 	if (hx->dsi[1])
 		hx->dsi[1]->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
 	hx8279_power_off(hx);
 
-	return dsi_ctx.accum_err;
+	return 0;
 }
 
 static int hx8279_get_modes(struct drm_panel *panel, struct drm_connector *connector)
@@ -821,7 +928,7 @@ static int hx8279_check_goa_config(struct hx8279 *hx, struct device *dev)
 	/* Up to 4 zero values is a valid configuration. Check them all. */
 	num_zero = 1;
 	for (i = 0; i < ARRAY_SIZE(desc->goa_odd_timing); i++) {
-		if (desc->goa_odd_timing[i])
+		if (desc->goa_odd_timing[i] && desc->goa_odd_timing[i] != 0xff)
 			num_zero++;
 	}
 
@@ -830,7 +937,7 @@ static int hx8279_check_goa_config(struct hx8279 *hx, struct device *dev)
 	/* Up to 3 zeroes is a valid config. Check them all. */
 	num_zero = 1;
 	for (i = 0; i < ARRAY_SIZE(desc->goa_even_timing); i++) {
-		if (desc->goa_even_timing[i])
+		if (desc->goa_even_timing[i] && desc->goa_even_timing[i] != 0xff)
 			num_zero++;
 	}
 
@@ -862,6 +969,8 @@ static int hx8279_check_goa_config(struct hx8279 *hx, struct device *dev)
 	/*
 	 * Don't perform zero check for polarity and start position, as
 	 * both pol=0 and start=0 are valid configuration values.
+	 * Having no CLR entries (all < 0) is also valid - some panels
+	 * configure GOA STV/CKV/timing without any CLR registers.
 	 */
 	for (i = 0; i < ARRAY_SIZE(desc->goa_clr_start_pos); i++) {
 		if (desc->goa_clr_start_pos[i] < 0)
@@ -872,8 +981,6 @@ static int hx8279_check_goa_config(struct hx8279 *hx, struct device *dev)
 		else
 			num_clr++;
 	}
-	if (!num_clr)
-		return -EINVAL;
 
 	for (i = 0; i < ARRAY_SIZE(desc->goa_clr_polarity); i++) {
 		if (num_clr < 0)
@@ -992,6 +1099,45 @@ static int hx8279_check_params(struct hx8279 *hx, struct device *dev)
 	return 0;
 }
 
+static int hx8279_bl_update_status(struct backlight_device *bl)
+{
+	struct mipi_dsi_device *dsi = bl_get_data(bl);
+	struct hx8279 *hx = mipi_dsi_get_drvdata(dsi);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = dsi };
+	u16 brightness = backlight_get_brightness(bl);
+
+	/*
+	 * HX8279 uses vendor Page 4 register B8 for backlight brightness,
+	 * not the standard DCS command 0x51.  The downstream kernel writes
+	 * brightness as: B0=04 (page 4), B8=<level>.
+	 */
+	hx8279_set_page(hx, &dsi_ctx, 4);
+	if (!dsi_ctx.accum_err) {
+		const u8 cmd[] = { 0xb8, brightness & 0xff };
+
+		mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, cmd, sizeof(cmd));
+	}
+
+	return dsi_ctx.accum_err;
+}
+
+static const struct backlight_ops hx8279_bl_ops = {
+	.update_status = hx8279_bl_update_status,
+};
+
+static struct backlight_device *hx8279_create_backlight(struct mipi_dsi_device *dsi)
+{
+	struct device *dev = &dsi->dev;
+	const struct backlight_properties props = {
+		.type = BACKLIGHT_RAW,
+		.brightness = 255,
+		.max_brightness = 255,
+	};
+
+	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
+					      &hx8279_bl_ops, &props);
+}
+
 static int hx8279_probe(struct mipi_dsi_device *dsi)
 {
 	struct device *dev = &dsi->dev;
@@ -1063,6 +1209,15 @@ static int hx8279_probe(struct mipi_dsi_device *dsi)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to get backlight\n");
 
+	if (!hx->panel.backlight) {
+		hx->panel.backlight = hx8279_create_backlight(dsi);
+		if (IS_ERR(hx->panel.backlight))
+			return dev_err_probe(dev, PTR_ERR(hx->panel.backlight),
+					     "Failed to create backlight\n");
+	}
+
+	hx->panel.prepare_prev_first = true;
+
 	drm_panel_add(&hx->panel);
 
 	for (i = 0; i < 2; i++) {
@@ -1072,12 +1227,16 @@ static int hx8279_probe(struct mipi_dsi_device *dsi)
 		hx->dsi[i]->lanes = hx->desc->num_lanes;
 		hx->dsi[i]->format = MIPI_DSI_FMT_RGB888;
 
-		hx->dsi[i]->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS |
-					 MIPI_DSI_MODE_LPM;
+		hx->dsi[i]->mode_flags = MIPI_DSI_MODE_LPM;
 
-		if (hx->desc->mode_data[0].is_video_mode)
-			hx->dsi[i]->mode_flags |= MIPI_DSI_MODE_VIDEO |
-						  MIPI_DSI_MODE_VIDEO_SYNC_PULSE;
+		if (hx->desc->mode_data[0].is_video_mode) {
+			hx->dsi[i]->mode_flags |= MIPI_DSI_MODE_VIDEO;
+
+			if (hx->desc->mode_data[0].is_video_burst_mode)
+				hx->dsi[i]->mode_flags |= MIPI_DSI_MODE_VIDEO_BURST;
+			else
+				hx->dsi[i]->mode_flags |= MIPI_DSI_MODE_VIDEO_SYNC_PULSE;
+		}
 
 		ret = devm_mipi_dsi_attach(dev, hx->dsi[i]);
 		if (ret < 0) {
@@ -1274,8 +1433,128 @@ static const struct hx8279_panel_desc startek_kd070fhfid078 = {
 	.src_delay_time_adj_ck = 72,
 };
 
+static const struct hx8279_panel_mode boe_tv101wum_hx8279_modes[] = {
+	{
+		.mode = {
+			.clock = 152244, /* Recalculated: 1292 * 1964 * 60fps */
+			.hdisplay = 1200,
+			.hsync_start = 1200 + 20,
+			.hsync_end = 1200 + 20 + 24,
+			.htotal = 1200 + 20 + 24 + 48, /* Changed HBP from 46 to 48 */
+			.vdisplay = 1920,
+			.vsync_start = 1920 + 30,
+			.vsync_end = 1920 + 30 + 1,
+			.vtotal = 1920 + 30 + 1 + 13,
+			.width_mm = 141,
+			.height_mm = 226,
+			.type = DRM_MODE_TYPE_DRIVER
+		},
+		.bpc = 8,
+		.is_video_mode = true,
+		.is_video_burst_mode = false,
+	},
+};
+
+static const struct hx8279_goa_mux boe_tv101wum_hx8279_gmux = {
+	/*
+	 * 0xff = skip: the downstream vendor kernel does not program GOA mux
+	 * positions at indices 6, 7, 14, 15, 16, 17 (registers C6, C7, CE, CF,
+	 * D0, D1 for left; DA, DB, E2, E3, E4, E5 for right). The HX8279 IC
+	 * holds non-zero defaults in these registers (C6/C7=0x16, CE=0x15).
+	 * Writing 0x00 would route gate outputs to signal 0 (STV/CKV ground),
+	 * causing gate-line contention and vertical smearing.
+	 */
+	.gout_l = { 0x05, 0x05, 0x0b, 0x0b, 0x09, 0x09, 0xff, 0xff, 0x00, 0x00,
+		    0x07, 0x07, 0x26, 0x26, 0xff, 0xff, 0xff, 0xff, 0x03, 0x03 },
+	.gout_r = { 0x06, 0x06, 0x0c, 0x0c, 0x0a, 0x0a, 0xff, 0xff, 0x00, 0x00,
+		    0x08, 0x08, 0x26, 0x26, 0xff, 0xff, 0xff, 0xff, 0x04, 0x04 },
+};
+
+static const struct hx8279_analog_gamma boe_tv101wum_hx8279_ana_gamma = {
+	.pos = { 0x00, 0x0f, 0x1a, 0x2b, 0x38, 0x39, 0x38, 0x38, 0x36,
+		 0x34, 0x35, 0x36, 0x39, 0x2d, 0x2e, 0x2f, 0x07 },
+	.neg = { 0x00, 0x0f, 0x1a, 0x2b, 0x38, 0x39, 0x38, 0x38, 0x36,
+		 0x34, 0x35, 0x36, 0x39, 0x2d, 0x2e, 0x2f, 0x07 },
+};
+
+static const struct hx8279_digital_gamma boe_tv101wum_hx8279_dig_gamma = {
+	.r = { 0x00, 0x04, 0x0a, 0x1a, 0x29, 0x38, 0x5a, 0x79, 0xbf, 0x05,
+	       0x88, 0x14, 0x18, 0x97, 0x11, 0x4b, 0x82, 0x9b, 0xb6, 0xc3,
+	       0xd0, 0xdb, 0xe1, 0xe4, 0x00, 0x00, 0x16, 0xaf, 0xff, 0xff },
+	.g = { 0x00, 0x03, 0x0a, 0x1a, 0x29, 0x38, 0x5a, 0x7a, 0xc1, 0x07,
+	       0x8b, 0x17, 0x1b, 0x99, 0x13, 0x4c, 0x84, 0x9d, 0xb7, 0xc4,
+	       0xd0, 0xdb, 0xe1, 0xe4, 0x00, 0x00, 0x16, 0xaf, 0xff, 0xff },
+	.b = { 0x04, 0x04, 0x09, 0x1a, 0x2b, 0x3a, 0x5d, 0x80, 0xca, 0x13,
+	       0x9d, 0x30, 0x34, 0xbb, 0x30, 0x6a, 0xa1, 0xbc, 0xd4, 0xe0,
+	       0xeb, 0xf6, 0xfa, 0xfc, 0x00, 0x00, 0x16, 0xaf, 0xff, 0xff },
+};
+
+static const struct hx8279_panel_desc boe_tv101wum_hx8279 = {
+	.dsi_info = {
+		.type = "TV101WUM-BOE",
+		.channel = 0,
+		.node = NULL,
+	},
+	.mode_data = boe_tv101wum_hx8279_modes,
+	.num_modes = ARRAY_SIZE(boe_tv101wum_hx8279_modes),
+	.num_lanes = 4,
+
+	/* Driver/Module Configuration: LC Matrix voltages */
+	.dsi_cfg = 0x03,
+	.panel_setting = 0x87,
+	.vgh_mv = 18000,
+	.vgl_mv = 11200,
+	.vgph_mv = 4600,
+	.vgpls = 0x02,
+	.vgnh_mv = 4600,
+	.vgnls = 0x02,
+
+	/* Analog Gamma correction */
+	.agamma = &boe_tv101wum_hx8279_ana_gamma,
+
+	/* Gate driver On Array (GOA) Muxing */
+	.gmux = &boe_tv101wum_hx8279_gmux,
+
+	/* Gate driver On Array (GOA) Configuration */
+	.goa_stv_lead_time_ck = 11,
+	.goa_ckv_lead_time_ck = 7,
+	.goa_ckv_dummy_vblank_num = 3,
+	.goa_ckv_rise_precharge = 0,
+	.goa_ckv_fall_precharge = 0,
+	.goa_clr1_width_adj = 0,
+	.goa_clr234_width_adj = 0,
+	.goa_clr_polarity = { -1, -1, -1, -1 },
+	.goa_clr_start_pos = { -1, -1, -1, -1 },
+	.goa_unk_e4 = 0xc0,
+	.goa_unk_e5 = 0x0d,
+
+	/*
+	 * GOA Timing: 0xff = skip. The downstream vendor kernel only programs
+	 * odd indices 1 (C3=0x00) and 3 (C5=0x2A), and even index 1 (DE=0x2A).
+	 * All other timing registers are left at IC defaults.
+	 */
+	.goa_odd_timing = { 0xff, 0, 0xff, 42, 0xff, 0xff },
+	.goa_even_timing = { 0xff, 42, 0xff, 0xff, 0xff, 0xff },
+
+	/* MIPI Configuration */
+	.bta_tlpx = 2,
+	.lhs_settle_time_by_osc25 = true,
+	.ths_settle_time = 2,
+
+	/* ENG/Gamma Configuration */
+	.gamma_ctl = FIELD_PREP_CONST(HX8279_P6_GAMMA_POCGM_CTL, 3) |
+		     FIELD_PREP_CONST(HX8279_P6_GAMMA_POGCMD_CTL, 3),
+	.volt_adj = FIELD_PREP_CONST(HX8279_P6_VOLT_ADJ_VCCIFS, 3) |
+		    FIELD_PREP_CONST(HX8279_P6_VOLT_ADJ_VCCS, 3),
+	.src_delay_time_adj_ck = 50,
+
+	/* Digital Gamma Adjustment */
+	.dgamma = &boe_tv101wum_hx8279_dig_gamma,
+};
+
 static const struct of_device_id hx8279_of_match[] = {
 	{ .compatible = "aoly,sl101pm1794fog-v15", .data = &aoly_sl101pm1794fog_v15 },
+	{ .compatible = "boe,tv101wum-hx8279", .data = &boe_tv101wum_hx8279 },
 	{ .compatible = "startek,kd070fhfid078", .data = &startek_kd070fhfid078 },
 	{ /* sentinel */ }
 };
