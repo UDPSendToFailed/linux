@@ -1039,6 +1039,16 @@ config FUEL_GAUGE_STC3117
          Say Y here to enable support for fuel gauge with STC3117
          chip.
 
+config FUEL_GAUGE_S2MU004
+	tristate "Samsung S2MU004 fuel gauge driver"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Say Y here to enable support for the Samsung S2MU004 fuel gauge.
+	  This is a coulomb-counting battery monitor found in Samsung mobile
+	  devices such as the Galaxy Tab A 10.5 (gta2xlwifi). It reports
+	  battery voltage, current, state of charge, and temperature.
+
 config CHARGER_UCS1002
 	tristate "Microchip UCS1002 USB Port Power Controller"
 	depends on I2C
