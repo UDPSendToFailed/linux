@@ -1250,6 +1250,17 @@ config TOUCHSCREEN_ST1232
 	  To compile this driver as a module, choose M here: the
 	  module will be called st1232_ts.
 
+config TOUCHSCREEN_STM_FTS1BA90A
+	tristate "STMicroelectronics FTS1BA90A touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you want support for the STMicroelectronics
+	  FTS1BA90A capacitive touchscreen controller, found in
+	  Samsung Galaxy Tab A 10.5 (2018) and similar devices.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called stm_fts1ba90a.
+
 config TOUCHSCREEN_STMFTS
 	tristate "STMicroelectronics STMFTS touchscreen"
 	depends on I2C
