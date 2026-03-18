@@ -100,6 +100,14 @@ config TYPEC_STUSB160X
 	  If you choose to build this driver as a dynamically linked module, the
 	  module will be called stusb160x.ko.
 
+config TYPEC_S2MM005
+	tristate "Samsung S2MM005 USB Type-C CC/PD controller"
+	depends on I2C
+	help
+	  Say Y or M here if your board has a Samsung S2MM005 USB Type-C
+	  CC and PD controller, found on some Samsung Snapdragon 450
+	  devices (e.g. Galaxy Tab A 10.5).
+
 config TYPEC_WUSB3801
 	tristate "Willsemi WUSB3801 Type-C port controller driver"
 	depends on I2C
