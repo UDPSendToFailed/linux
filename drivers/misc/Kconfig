@@ -657,6 +657,18 @@ source "drivers/misc/cardreader/Kconfig"
 source "drivers/misc/uacce/Kconfig"
 source "drivers/misc/pvpanic/Kconfig"
 source "drivers/misc/mchp_pci1xxxx/Kconfig"
+config S2MU004_MUIC_USB
+	tristate "Samsung S2MU004 MUIC USB data-path enable"
+	depends on I2C
+	help
+	  Minimal stub driver for the Samsung S2MU004 MUIC that puts
+	  the internal analog switches into manual mode and routes the
+	  USB D+/D- lines to the DWC3 controller.  Required on Samsung
+	  devices where the MUIC sits between the SoC and the Type-C
+	  connector (e.g. Galaxy Tab A 10.5).
+
+	  Say Y or M if your board has an S2MU004 and you need USB.
+
 source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
