@@ -376,6 +376,23 @@ static ssize_t initstate_show(struct device *dev,
 	return sysfs_emit(buf, "%u\n", val);
 }
 
+/*
+ * Compat: Android's fs_mgr checks for max_comp_streams before setting up zram.
+ * This attribute was removed from mainline but we expose it as a read-only
+ * value returning the number of online CPUs (the effective stream count).
+ */
+static ssize_t max_comp_streams_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", num_online_cpus());
+}
+
+static ssize_t max_comp_streams_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	return len;
+}
+
 static ssize_t disksize_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -2882,10 +2899,12 @@ static DEVICE_ATTR_RW(recomp_algorithm);
 static DEVICE_ATTR_WO(recompress);
 #endif
 static DEVICE_ATTR_WO(algorithm_params);
+static DEVICE_ATTR_RW(max_comp_streams);
 
 static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_disksize.attr,
 	&dev_attr_initstate.attr,
+	&dev_attr_max_comp_streams.attr,
 	&dev_attr_reset.attr,
 	&dev_attr_compact.attr,
 	&dev_attr_mem_limit.attr,
