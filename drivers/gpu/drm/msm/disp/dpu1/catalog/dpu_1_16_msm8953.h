@@ -8,7 +8,7 @@
 
 static const struct dpu_caps msm8953_dpu_caps = {
 	.max_mixer_width = DEFAULT_DPU_LINE_WIDTH,
-	.max_mixer_blendstages = 0x4,
+	.max_mixer_blendstages = 0x5,
 	.max_linewidth = DEFAULT_DPU_LINE_WIDTH,
 	.pixel_ram_size = 40 * 1024,
 	.max_hdeci_exp = MAX_HORZ_DECIMATION,
@@ -70,7 +70,7 @@ static const struct dpu_sspp_cfg msm8953_sspp[] = {
 	}, {
 		.name = "sspp_8", .id = SSPP_DMA0,
 		.base = 0x24000, .len = 0x150,
-		.features = DMA_MSM8953_MASK | BIT(DPU_SSPP_CURSOR),
+		.features = DMA_MSM8953_MASK,
 		.sblk = &dpu_dma_sblk,
 		.xin_id = 2,
 		.type = SSPP_TYPE_DMA,

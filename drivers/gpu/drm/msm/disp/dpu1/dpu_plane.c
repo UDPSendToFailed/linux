@@ -507,8 +507,15 @@ static void _dpu_plane_setup_pixel_ext(struct dpu_hw_scaler3_cfg *scale_cfg,
 			h /= chroma_subsmpl_v;
 		}
 
-		pixel_ext->num_ext_pxls_top[i] = h;
-		pixel_ext->num_ext_pxls_left[i] = w;
+		pixel_ext->roi_w[i] = w;
+		pixel_ext->roi_h[i] = h;
+
+		if (scale_cfg->enable) {
+			pixel_ext->num_ext_pxls_right[i] = 1;
+			pixel_ext->num_ext_pxls_btm[i] = 1;
+			pixel_ext->right_rpt[i] = 1;
+			pixel_ext->btm_rpt[i] = 1;
+		}
 	}
 }
 

@@ -259,7 +259,7 @@ static const u32 wb2_formats_rgb_yuv[] = {
 	.num_formats = ARRAY_SIZE(plane_formats), \
 	}
 
-/* qseed2 is not supported, so disabled scaling */
+/* qseed2 scaler: bilinear for upscale, PCMN for downscale */
 #define _VIG_SBLK_QSEED2() \
 	{ \
 	.scaler_blk = {.name = "scaler", \

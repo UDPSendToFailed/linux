@@ -398,9 +398,104 @@ static void dpu_hw_sspp_setup_pe_config(struct dpu_hw_sspp *ctx,
 
 	/* color 3 */
 	DPU_REG_WRITE(c, SSPP_SW_PIX_EXT_C3_LR, lr_pe[3]);
-	DPU_REG_WRITE(c, SSPP_SW_PIX_EXT_C3_TB, lr_pe[3]);
+	DPU_REG_WRITE(c, SSPP_SW_PIX_EXT_C3_TB, tb_pe[3]);
 	DPU_REG_WRITE(c, SSPP_SW_PIX_EXT_C3_REQ_PIXELS,
 			tot_req_pixels[3]);
+}
+
+static void _dpu_hw_sspp_setup_scaler_qseed2(struct dpu_hw_sspp *ctx,
+		struct dpu_hw_scaler3_cfg *scaler3_cfg,
+		const struct msm_format *format)
+{
+	struct dpu_hw_blk_reg_map *c;
+	u32 offset;
+	u32 scale_config = 0;
+	u32 src_w, src_h, dst_w, dst_h;
+	bool is_yuv;
+	u32 ya_hfilt, ya_vfilt, uv_hfilt, uv_vfilt;
+
+	if (!ctx || !scaler3_cfg)
+		return;
+
+	c = &ctx->hw;
+	offset = ctx->cap->sblk->scaler_blk.base;
+	is_yuv = format && MSM_FORMAT_IS_YUV(format);
+
+	if (!scaler3_cfg->enable) {
+		DPU_REG_WRITE(c, offset + SCALE_CONFIG, 0);
+		/* Reset phase steps to identity to prevent stale register values */
+		DPU_REG_WRITE(c, offset + COMP0_3_PHASE_STEP_X, 0x200000);
+		DPU_REG_WRITE(c, offset + COMP0_3_PHASE_STEP_Y, 0x200000);
+		DPU_REG_WRITE(c, offset + COMP1_2_PHASE_STEP_X, 0x200000);
+		DPU_REG_WRITE(c, offset + COMP1_2_PHASE_STEP_Y, 0x200000);
+		return;
+	}
+
+	src_w = scaler3_cfg->src_width[0];
+	src_h = scaler3_cfg->src_height[0];
+	dst_w = scaler3_cfg->dst_width;
+	dst_h = scaler3_cfg->dst_height;
+
+	/*
+	 * Filter selection per MDP5 QSEED2 convention:
+	 *   upscale (src <= dst): bilinear
+	 *   downscale (src > dst): PCMN (polyphase)
+	 */
+	ya_hfilt = (src_w <= dst_w) ? DPU_SCALE_FILTER_BIL : DPU_SCALE_FILTER_PCMN;
+	ya_vfilt = (src_h <= dst_h) ? DPU_SCALE_FILTER_BIL : DPU_SCALE_FILTER_PCMN;
+
+	/* Horizontal scaling */
+	if (src_w != dst_w) {
+		scale_config |= BIT(0); /* SCALEX_EN */
+		scale_config |= (ya_hfilt & 0x3) << 8;  /* COMP_0 X filter */
+		scale_config |= (ya_hfilt & 0x3) << 16; /* COMP_3 X filter (alpha) */
+		if (is_yuv) {
+			const struct drm_format_info *info =
+				drm_format_info(format->pixel_format);
+			uv_hfilt = ((src_w / info->hsub) <= dst_w) ?
+				DPU_SCALE_FILTER_BIL : DPU_SCALE_FILTER_PCMN;
+			scale_config |= (uv_hfilt & 0x3) << 12; /* COMP_1_2 X */
+		}
+	}
+
+	/* Vertical scaling */
+	if (src_h != dst_h) {
+		scale_config |= BIT(1); /* SCALEY_EN */
+		scale_config |= (ya_vfilt & 0x3) << 10; /* COMP_0 Y filter */
+		scale_config |= (ya_vfilt & 0x3) << 18; /* COMP_3 Y filter (alpha) */
+		if (is_yuv) {
+			const struct drm_format_info *info =
+				drm_format_info(format->pixel_format);
+			uv_vfilt = ((src_h / info->vsub) <= dst_h) ?
+				DPU_SCALE_FILTER_BIL : DPU_SCALE_FILTER_PCMN;
+			scale_config |= (uv_vfilt & 0x3) << 14; /* COMP_1_2 Y */
+		}
+	}
+
+	DRM_DEBUG_KMS("QSEED2: src=%ux%u dst=%ux%u scale_config=0x%08x yuv=%d\n",
+		      src_w, src_h, dst_w, dst_h, scale_config, is_yuv);
+
+	/* Y/RGB + alpha component phase step and init phase */
+	DPU_REG_WRITE(c, offset + COMP0_3_PHASE_STEP_X,
+		scaler3_cfg->phase_step_x[0] & 0xFFFFFF);
+	DPU_REG_WRITE(c, offset + COMP0_3_PHASE_STEP_Y,
+		scaler3_cfg->phase_step_y[0] & 0xFFFFFF);
+	DPU_REG_WRITE(c, offset + COMP0_3_INIT_PHASE_X,
+		scaler3_cfg->init_phase_x[0] & 0x3F);
+	DPU_REG_WRITE(c, offset + COMP0_3_INIT_PHASE_Y,
+		scaler3_cfg->init_phase_y[0] & 0x3F);
+
+	/* Always write CrCb/COMP1_2 phase step registers (matching MDP5) */
+	DPU_REG_WRITE(c, offset + COMP1_2_PHASE_STEP_X,
+		scaler3_cfg->phase_step_x[1] & 0xFFFFFF);
+	DPU_REG_WRITE(c, offset + COMP1_2_PHASE_STEP_Y,
+		scaler3_cfg->phase_step_y[1] & 0xFFFFFF);
+	DPU_REG_WRITE(c, offset + COMP1_2_INIT_PHASE_X,
+		scaler3_cfg->init_phase_x[1] & 0x3F);
+	DPU_REG_WRITE(c, offset + COMP1_2_INIT_PHASE_Y,
+		scaler3_cfg->init_phase_y[1] & 0x3F);
+
+	DPU_REG_WRITE(c, offset + SCALE_CONFIG, scale_config);
 }
 
 static void _dpu_hw_sspp_setup_scaler3(struct dpu_hw_sspp *ctx,
@@ -628,6 +723,8 @@ static void _setup_layer_ops(struct dpu_hw_sspp *c,
 
 	if (test_bit(DPU_SSPP_SCALER_QSEED3_COMPATIBLE, &features))
 		c->ops.setup_scaler = _dpu_hw_sspp_setup_scaler3;
+	else if (test_bit(DPU_SSPP_SCALER_QSEED2, &features))
+		c->ops.setup_scaler = _dpu_hw_sspp_setup_scaler_qseed2;
 
 	if (test_bit(DPU_SSPP_CDP, &features))
 		c->ops.setup_cdp = dpu_hw_sspp_setup_cdp;

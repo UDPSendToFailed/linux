@@ -556,6 +556,12 @@ static void _dpu_crtc_blend_setup(struct drm_crtc *crtc)
 		ctl = mixer[i].lm_ctl;
 		lm = mixer[i].hw_lm;
 
+		/* Initialize border color to black to prevent artifacts */
+		if (lm->ops.setup_border_color) {
+			struct dpu_mdss_color border = {0, 0, 0, 0};
+			lm->ops.setup_border_color(lm, &border, 1);
+		}
+
 		lm->ops.setup_alpha_out(lm, mixer[i].mixer_op_mode);
 
 		/* stage config flush mask */

@@ -812,7 +812,7 @@ static struct dpu_hw_sspp *dpu_rm_try_sspp(struct dpu_rm *rm,
 		if (reqs->scale && !hw_sspp->cap->sblk->scaler_blk.len)
 			continue;
 
-		// TODO: QSEED2 and RGB scalers are not yet supported
+		// TODO: RGB scalers are not yet supported
 		if (reqs->scale && !hw_sspp->ops.setup_scaler)
 			continue;
 
