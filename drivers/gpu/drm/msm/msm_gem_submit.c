@@ -89,6 +89,14 @@ void __msm_gem_submit_destroy(struct kref *kref)
 	unsigned i;
 
 	/*
+	 * If the scheduler killed the job without running it (e.g.
+	 * process killed with in-flight submits), msm_submit_retire()
+	 * was never called from retire_submit().  Clean up any remaining
+	 * BO references here to prevent GEM object and page leaks.
+	 */
+	msm_submit_retire(submit);
+
+	/*
 	 * In error paths, we could unref the submit without calling
 	 * drm_sched_entity_push_job(), so msm_job_free() will never
 	 * get called.  Since drm_sched_job_cleanup() will NULL out
@@ -372,6 +380,9 @@ static int submit_pin_objects(struct msm_gem_submit *submit)
 		submit->bos[i].iova = vma->va.addr;
 	}
 
+	if (ret)
+		return ret;
+
 	/*
 	 * A second loop while holding the LRU lock (a) avoids acquiring/dropping
 	 * the LRU lock for each individual bo, while (b) avoiding holding the
@@ -387,7 +398,7 @@ static int submit_pin_objects(struct msm_gem_submit *submit)
 
 	submit->bos_pinned = true;
 
-	return ret;
+	return 0;
 }
 
 static void submit_unpin_objects(struct msm_gem_submit *submit)
@@ -540,10 +551,16 @@ void msm_submit_retire(struct msm_gem_submit *submit)
 		struct drm_gpuvm_bo *vm_bo = submit->bos[i].vm_bo;
 
 		msm_gem_lock(obj);
+		if (submit->bos_pinned)
+			msm_gem_unpin_locked(obj);
 		drm_gpuvm_bo_put(vm_bo);
 		msm_gem_unlock(obj);
 		drm_gem_object_put(obj);
 	}
+	
+	submit->bos_pinned = false;
+	/* Mark as retired so __msm_gem_submit_destroy won't double-free */
+	submit->nr_bos = 0;
 }
 
 int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
