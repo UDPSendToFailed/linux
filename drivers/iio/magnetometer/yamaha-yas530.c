@@ -78,6 +78,19 @@
 #define YAS537_TRM			0x9F
 #define YAS537_CAL			0xC0
 
+/* Registers used by YAS539 */
+#define YAS539_MEASURE			0x81
+#define YAS539_RCOIL			0x82
+#define YAS539_MEASURE_INTERVAL		0x83
+#define YAS539_RCAUTO			0x85
+#define YAS539_AVR			0x87
+#define YAS539_SRST			0x90
+#define YAS539_ADCCAL			0x91
+#define YAS539_TRM			0x9F
+#define YAS539_RCDRVR			0xA0
+#define YAS539_RCCURR			0xAA
+#define YAS539_CAL			0xC0
+
 /* Bits in the YAS5xx config register */
 #define YAS5XX_CONFIG_INTON		BIT(0) /* Interrupt on? */
 #define YAS5XX_CONFIG_INTHACT		BIT(1) /* Interrupt active high? */
@@ -115,6 +128,7 @@
 #define YAS532_DATA_OVERFLOW		(BIT(YAS532_DATA_BITS) - 1)
 
 #define YAS537_DEVICE_ID		0x07 /* YAS537 (MS-3T) */
+#define YAS539_DEVICE_ID		0x08 /* YAS539 (MS-3S) */
 #define YAS537_VERSION_0		0 /* Version naming unknown */
 #define YAS537_VERSION_1		1 /* Version naming unknown */
 #define YAS537_MAG_AVERAGE_32_MASK	GENMASK(6, 4)
@@ -130,6 +144,14 @@
 #define YAS537_LCK_MASK_GET		GENMASK(3, 0)
 #define YAS537_OC_MASK_GET		GENMASK(5, 0)
 
+#define YAS539_DATA_BITS		15
+#define YAS539_DATA_CENTER		BIT(YAS539_DATA_BITS - 1)
+#define YAS539_DATA_OVERFLOW		(BIT(YAS539_DATA_BITS) - 1)
+#define YAS539_MEASURE_TIME_WORST_US	1500
+#define YAS539_DEFAULT_SENSOR_DELAY_MS	50
+#define YAS539_MAG_RCOIL_TIME_US	65
+#define YAS539_MAG_AVERAGE_64_MASK	GENMASK(5, 3)
+
 /* Turn off device regulators etc after 5 seconds of inactivity */
 #define YAS5XX_AUTOSUSPEND_DELAY_MS	5000
 
@@ -138,6 +160,7 @@ enum chip_ids {
 	yas532,
 	yas533,
 	yas537,
+	yas539,
 };
 
 static const int yas530_volatile_reg[] = {
@@ -147,6 +170,10 @@ static const int yas530_volatile_reg[] = {
 
 static const int yas537_volatile_reg[] = {
 	YAS537_MEASURE,
+};
+
+static const int yas539_volatile_reg[] = {
+	YAS539_MEASURE,
 };
 
 struct yas5xx_calibration {
@@ -604,6 +631,93 @@ static int yas537_get_measure(struct yas5xx *yas5xx, s32 *to, s32 *xo, s32 *yo, 
 	*xo = (x - BIT(13)) * 300;
 	*yo = (y1 - y2) * 1732 / 10;
 	*zo = (-y1 - y2 + BIT(14)) * 300;
+
+	return 0;
+}
+
+/**
+ * yas539_measure() - Make a measure from the hardware
+ * @yas5xx: The device state
+ * @t: the raw temperature measurement
+ * @x: the raw x axis measurement
+ * @y1: the y1 axis measurement
+ * @y2: the y2 axis measurement
+ * @return: 0 on success or error code
+ */
+static int yas539_measure(struct yas5xx *yas5xx, u16 *t, u16 *x, u16 *y1, u16 *y2)
+{
+	unsigned int busy;
+	u8 data[8];
+	int ret;
+
+	mutex_lock(&yas5xx->lock);
+
+	/* YAS539 uses start + cont bits */
+	ret = regmap_write(yas5xx->map, YAS539_MEASURE, YAS5XX_MEASURE_START |
+			   YAS5XX_MEASURE_CONT);
+	if (ret < 0)
+		goto out_unlock;
+
+	/* Busy bit is in data row 2 like YAS537 */
+	ret = regmap_read_poll_timeout(yas5xx->map, YAS5XX_MEASURE_DATA + 2, busy,
+				       !(busy & YAS5XX_MEASURE_DATA_BUSY),
+				       500, 20000);
+	if (ret) {
+		dev_err(yas5xx->dev, "timeout waiting for measurement\n");
+		goto out_unlock;
+	}
+
+	ret = regmap_bulk_read(yas5xx->map, YAS5XX_MEASURE_DATA,
+			       data, sizeof(data));
+	if (ret)
+		goto out_unlock;
+
+	mutex_unlock(&yas5xx->lock);
+
+	*t = get_unaligned_be16(&data[0]);
+	/* YAS539 has 15-bit axis data */
+	*x = FIELD_GET(GENMASK(14, 0), get_unaligned_be16(&data[2]));
+	*y1 = get_unaligned_be16(&data[4]);
+	*y2 = get_unaligned_be16(&data[6]);
+
+	return 0;
+
+out_unlock:
+	mutex_unlock(&yas5xx->lock);
+	return ret;
+}
+
+/**
+ * yas539_get_measure() - Measure a sample of all axis and process
+ * @yas5xx: The device state
+ * @to: Temperature out
+ * @xo: X axis out
+ * @yo: Y axis out
+ * @zo: Z axis out
+ * @return: 0 on success or error code
+ */
+static int yas539_get_measure(struct yas5xx *yas5xx, s32 *to, s32 *xo, s32 *yo, s32 *zo)
+{
+	u16 t, x, y1, y2;
+	int ret;
+
+	/* We first get raw data that needs to be translated to [x,y,z] */
+	ret = yas539_measure(yas5xx, &t, &x, &y1, &y2);
+	if (ret)
+		return ret;
+
+	/* Calculate temperature readout */
+	*to = yas5xx_calc_temperature(yas5xx, t);
+
+	/*
+	 * YAS539 has 15-bit data and different scaling from YAS537:
+	 *   scale factor is 150 (vs 300 for YAS537)
+	 *   Y scale is 866/10 (vs 1732/10 for YAS537)
+	 *   center is BIT(14) (vs BIT(13) for YAS537)
+	 */
+	*xo = (x - BIT(14)) * 150;
+	*yo = (y1 - y2) * 866 / 10;
+	*zo = (-y1 - y2 + BIT(15)) * 150;
 
 	return 0;
 }
@@ -1161,6 +1275,47 @@ static void yas537_dump_calibration(struct yas5xx *yas5xx)
 	}
 }
 
+static int yas539_get_calibration_data(struct yas5xx *yas5xx)
+{
+	u8 data[18];
+	int ret;
+
+	/* Writing SRST register — YAS539 uses 0x80 (vs 0x02 for YAS537) */
+	ret = regmap_write(yas5xx->map, YAS539_SRST, BIT(7));
+	if (ret)
+		return ret;
+
+	/* YAS539 needs a short delay after soft reset */
+	usleep_range(150, 200);
+
+	/* Calibration readout, YAS539 reads 18 bytes */
+	ret = regmap_bulk_read(yas5xx->map, YAS539_CAL, data, sizeof(data));
+	if (ret)
+		return ret;
+	dev_dbg(yas5xx->dev, "calibration data: %18ph\n", data);
+
+	/* Sanity check */
+	if (!memchr_inv(data, 0x00, 16) && !FIELD_GET(GENMASK(5, 0), data[16]))
+		dev_warn(yas5xx->dev, "calibration is blank!\n");
+
+	add_device_randomness(data, sizeof(data));
+
+	/*
+	 * YAS539 device ID is in data[0] with bit 7 masked off.
+	 * Version is in data[16] bits [7:6] like YAS537.
+	 * For YAS539 the calibration data is written directly to
+	 * registers, similar to YAS537 version 0.
+	 */
+	yas5xx->version = FIELD_GET(GENMASK(7, 6), data[16]);
+
+	return 0;
+}
+
+static void yas539_dump_calibration(struct yas5xx *yas5xx)
+{
+	dev_dbg(yas5xx->dev, "version = %u\n", yas5xx->version);
+}
+
 /* Used by YAS530, YAS532 and YAS533 */
 static int yas530_set_offsets(struct yas5xx *yas5xx, s8 ox, s8 oy1, s8 oy2)
 {
@@ -1320,6 +1475,47 @@ static int yas537_power_on(struct yas5xx *yas5xx)
 	return 0;
 }
 
+static int yas539_power_on(struct yas5xx *yas5xx)
+{
+	__be16 buf;
+	int ret;
+	u8 intrvl;
+
+	/* Writing ADCCAL and TRM registers — YAS539 uses different ADCCAL value */
+	buf = cpu_to_be16(GENMASK(9, 5)); /* 0xe0 shifted, vs 0xf8 for YAS537 */
+	ret = regmap_bulk_write(yas5xx->map, YAS539_ADCCAL, &buf, sizeof(buf));
+	if (ret)
+		return ret;
+	ret = regmap_write(yas5xx->map, YAS539_TRM, GENMASK(7, 0));
+	if (ret)
+		return ret;
+
+	/* The interval value is static in regular operation */
+	intrvl = (YAS539_DEFAULT_SENSOR_DELAY_MS * MILLI
+		 - YAS539_MEASURE_TIME_WORST_US) / 4100;
+	ret = regmap_write(yas5xx->map, YAS539_MEASURE_INTERVAL, intrvl);
+	if (ret)
+		return ret;
+
+	/* YAS539 default average is 64 */
+	ret = regmap_write(yas5xx->map, YAS539_AVR, YAS539_MAG_AVERAGE_64_MASK);
+	if (ret)
+		return ret;
+
+	/* Perform the rcoil: set RCDRVR + RCOIL bits */
+	ret = regmap_write(yas5xx->map, YAS539_RCDRVR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(yas5xx->map, YAS539_RCOIL, BIT(3));
+	if (ret)
+		return ret;
+
+	/* Wait until the coil has ramped up */
+	usleep_range(YAS539_MAG_RCOIL_TIME_US, YAS539_MAG_RCOIL_TIME_US + 100);
+
+	return 0;
+}
+
 static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 	[yas530] = {
 		.devid = YAS530_DEVICE_ID,
@@ -1380,6 +1576,21 @@ static const struct yas5xx_chip_info yas5xx_chip_info_tbl[] = {
 		.dump_calibration = yas537_dump_calibration,
 		/* .measure_offets is not needed for yas537 */
 		.power_on = yas537_power_on,
+	},
+	[yas539] = {
+		.devid = YAS539_DEVICE_ID,
+		.product_name = "YAS539 MS-3S",
+		.version_names = { "v0", "v1" }, /* version naming unknown */
+		.volatile_reg = yas539_volatile_reg,
+		.volatile_reg_qty = ARRAY_SIZE(yas539_volatile_reg),
+		.scaling_val2 = 100000, /* nanotesla to Gauss */
+		.t_ref = 8170, /* counts */
+		.min_temp_x10 = -3860, /* 1/10:s degrees Celsius */
+		.get_measure = yas539_get_measure,
+		.get_calibration_data = yas539_get_calibration_data,
+		.dump_calibration = yas539_dump_calibration,
+		/* .measure_offsets is not needed for yas539 */
+		.power_on = yas539_power_on,
 	},
 };
 
@@ -1583,6 +1794,7 @@ static const struct i2c_device_id yas5xx_id[] = {
 	{"yas532", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas532] },
 	{"yas533", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas533] },
 	{"yas537", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas537] },
+	{"yas539", (kernel_ulong_t)&yas5xx_chip_info_tbl[yas539] },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, yas5xx_id);
@@ -1592,6 +1804,7 @@ static const struct of_device_id yas5xx_of_match[] = {
 	{ .compatible = "yamaha,yas532", &yas5xx_chip_info_tbl[yas532] },
 	{ .compatible = "yamaha,yas533", &yas5xx_chip_info_tbl[yas533] },
 	{ .compatible = "yamaha,yas537", &yas5xx_chip_info_tbl[yas537] },
+	{ .compatible = "yamaha,yas539", &yas5xx_chip_info_tbl[yas539] },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, yas5xx_of_match);
