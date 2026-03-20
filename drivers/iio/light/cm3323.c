@@ -12,6 +12,7 @@
 #include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/mutex.h>
+#include <linux/regulator/consumer.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -59,6 +60,12 @@ struct cm3323_data {
 }
 
 static const struct iio_chan_spec cm3323_channels[] = {
+	{
+		.type = IIO_LIGHT,
+		.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+		.info_mask_shared_by_all = BIT(IIO_CHAN_INFO_INT_TIME),
+		.address = CM3323_CMD_CLEAR_DATA,
+	},
 	CM3323_COLOR_CHANNEL(RED, CM3323_CMD_RED_DATA),
 	CM3323_COLOR_CHANNEL(GREEN, CM3323_CMD_GREEN_DATA),
 	CM3323_COLOR_CHANNEL(BLUE, CM3323_CMD_BLUE_DATA),
@@ -229,6 +236,11 @@ static int cm3323_probe(struct i2c_client *client)
 	data->client = client;
 
 	mutex_init(&data->mutex);
+
+	ret = devm_regulator_get_enable(&client->dev, "vdd");
+	if (ret)
+		return dev_err_probe(&client->dev, ret,
+				     "Failed to enable vdd supply\n");
 
 	indio_dev->info = &cm3323_info;
 	indio_dev->name = CM3323_DRV_NAME;
