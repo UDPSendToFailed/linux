@@ -4070,6 +4070,9 @@ static int camss_of_parse_ports(struct camss *camss)
 			goto err_cleanup;
 		}
 
+		dev_info(dev, "probe: port endpoint -> remote sensor %pOF\n",
+			 remote);
+
 		csd = v4l2_async_nf_add_fwnode(&camss->notifier,
 					       of_fwnode_handle(remote),
 					       struct camss_async_subdev);
@@ -4393,6 +4396,9 @@ static int camss_subdev_notifier_bound(struct v4l2_async_notifier *async,
 	u8 id = csd->interface.csiphy_id;
 	struct csiphy_device *csiphy = &camss->csiphy[id];
 
+	dev_info(camss->dev, "async: sensor '%s' bound to csiphy%u\n",
+		 subdev->name, id);
+
 	csiphy->cfg.csi2 = &csd->interface.csi2;
 	subdev->host_priv = csiphy;
 
@@ -4404,6 +4410,9 @@ static int camss_subdev_notifier_complete(struct v4l2_async_notifier *async)
 	struct camss *camss = container_of(async, struct camss, notifier);
 	struct v4l2_device *v4l2_dev = &camss->v4l2_dev;
 	struct v4l2_subdev *sd;
+	int ret;
+
+	dev_info(camss->dev, "async: all sensors bound, creating pad links\n");
 
 	list_for_each_entry(sd, &v4l2_dev->subdevs, list) {
 		struct csiphy_device *csiphy = sd->host_priv;
@@ -4434,9 +4443,15 @@ static int camss_subdev_notifier_complete(struct v4l2_async_notifier *async)
 			camss_link_err(camss, sensor->name, input->name, ret);
 			return ret;
 		}
+
+		dev_info(camss->dev, "async: linked %s -> %s\n",
+			 sensor->name, input->name);
 	}
 
-	return v4l2_device_register_subdev_nodes(&camss->v4l2_dev);
+	ret = v4l2_device_register_subdev_nodes(&camss->v4l2_dev);
+	dev_info(camss->dev, "async: complete, subdev nodes registered (ret=%d)\n", ret);
+
+	return ret;
 }
 
 static const struct v4l2_async_notifier_operations camss_subdev_notifier_ops = {
@@ -4578,6 +4593,8 @@ static int camss_probe(struct platform_device *pdev)
 	struct camss *camss;
 	int ret;
 
+	dev_info(dev, "probe: start\n");
+
 	camss = devm_kzalloc(dev, sizeof(*camss), GFP_KERNEL);
 	if (!camss)
 		return -ENOMEM;
@@ -4613,8 +4630,12 @@ static int camss_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ret = camss_icc_get(camss);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_info(dev, "probe: icc_get failed: %d\n", ret);
 		return ret;
+	}
+
+	dev_info(dev, "probe: ICC OK\n");
 
 	ret = camss_configure_pd(camss);
 	if (ret < 0) {
@@ -4622,9 +4643,15 @@ static int camss_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	dev_info(dev, "probe: PD OK, init subdevices\n");
+
 	ret = camss_init_subdevices(camss);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_info(dev, "probe: init_subdevices failed: %d\n", ret);
 		goto err_genpd_cleanup;
+	}
+
+	dev_info(dev, "probe: subdevices OK\n");
 
 	ret = dma_set_mask_and_coherent(dev, 0xffffffff);
 	if (ret)
@@ -4648,8 +4675,11 @@ static int camss_probe(struct platform_device *pdev)
 	pm_runtime_enable(dev);
 
 	ret = camss_of_parse_ports(camss);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(dev, "probe: camss_of_parse_ports failed: %d\n", ret);
 		goto err_v4l2_device_unregister;
+	}
+	dev_info(dev, "probe: parsed %d port endpoints\n", ret);
 
 	ret = camss_register_entities(camss);
 	if (ret < 0)
@@ -4672,6 +4702,8 @@ static int camss_probe(struct platform_device *pdev)
 			"Failed to register async subdev nodes: %d\n", ret);
 		goto err_media_device_unregister;
 	}
+
+	dev_info(dev, "probe: CAMSS registered successfully\n");
 
 	return 0;
 

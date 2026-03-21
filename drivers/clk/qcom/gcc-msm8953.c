@@ -2525,7 +2525,7 @@ static struct clk_branch gcc_camss_csi2phy_clk = {
 
 static struct clk_branch gcc_camss_csi0phytimer_clk = {
 	.halt_reg = 0x4e01c,
-	.halt_check = BRANCH_HALT,
+	.halt_check = BRANCH_HALT_DELAY,
 	.clkr = {
 		.enable_reg = 0x4e01c,
 		.enable_mask = BIT(0),
@@ -2543,7 +2543,7 @@ static struct clk_branch gcc_camss_csi0phytimer_clk = {
 
 static struct clk_branch gcc_camss_csi1phytimer_clk = {
 	.halt_reg = 0x4f01c,
-	.halt_check = BRANCH_HALT,
+	.halt_check = BRANCH_HALT_DELAY,
 	.clkr = {
 		.enable_reg = 0x4f01c,
 		.enable_mask = BIT(0),
@@ -2561,7 +2561,7 @@ static struct clk_branch gcc_camss_csi1phytimer_clk = {
 
 static struct clk_branch gcc_camss_csi2phytimer_clk = {
 	.halt_reg = 0x4f068,
-	.halt_check = BRANCH_HALT,
+	.halt_check = BRANCH_HALT_DELAY,
 	.clkr = {
 		.enable_reg = 0x4f068,
 		.enable_mask = BIT(0),

@@ -510,7 +510,7 @@
 
 			csiphy0_ep: endpoint {
 				clock-lanes = <7>;
-				data-lanes = <0 1>;
+				data-lanes = <0 1 2 3>;
 				remote-endpoint = <&rear_cam_ep>;
 			};
 		};
@@ -538,25 +538,27 @@
 
 /* Rear camera: Samsung S5K4H5YC 8MP on CCI0 */
 &cci_i2c0 {
-	camera-sensor@36 {
+	camera-sensor@37 {
 		compatible = "samsung,s5k4h5yc";
-		reg = <0x36>;
+		reg = <0x37>;
 		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
 		clock-frequency = <24000000>;
 		reset-gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
 		dvdd-supply = <&pm8953_l2>;
 		avdd-supply = <&cam_avdd_rear>;
 		vio-supply = <&pm8953_l15>;
-		flash-leds = <&flash_led>;
-		lens-focus = <&lens_actuator>;
+		/* flash-leds and lens-focus removed: KTD2692 has no v4l2 async
+		 * registration, which permanently blocks the CAMSS async notifier
+		 * completion. Re-add once v4l2 flash subdev support is available.
+		 */
 		rotation = <90>;
 		orientation = <1>;
-		/* No mainline driver yet */
-		status = "disabled";
+		status = "okay";
 
 		port {
 			rear_cam_ep: endpoint {
-				data-lanes = <0 1>;
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <350000000>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
@@ -582,12 +584,12 @@
 		vio-supply = <&pm8953_l15>;
 		rotation = <270>;
 		orientation = <0>;
-		/* No mainline driver yet */
-		status = "disabled";
+		status = "okay";
 
 		port {
 			front_cam_ep: endpoint {
 				data-lanes = <0 1>;
+				link-frequencies = /bits/ 64 <448000000>;
 				remote-endpoint = <&csiphy1_ep>;
 			};
 		};

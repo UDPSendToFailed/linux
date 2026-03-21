@@ -204,10 +204,9 @@ static int csiphy_set_power(struct v4l2_subdev *sd, int on)
 {
 	struct csiphy_device *csiphy = v4l2_get_subdevdata(sd);
 	struct device *dev = csiphy->camss->dev;
+	int ret;
 
 	if (on) {
-		int ret;
-
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
 			return ret;
@@ -324,10 +323,18 @@ static int csiphy_set_stream(struct v4l2_subdev *sd, int enable)
 	struct csiphy_device *csiphy = v4l2_get_subdevdata(sd);
 	int ret = 0;
 
+	dev_info(csiphy->camss->dev,
+		 "CSIPHY%d set_stream: enable=%d lanes=%d\n",
+		 csiphy->id, enable,
+		 csiphy->cfg.csi2 ? csiphy->cfg.csi2->lane_cfg.num_data : -1);
+
 	if (enable)
 		ret = csiphy_stream_on(csiphy);
 	else
 		csiphy_stream_off(csiphy);
+
+	dev_info(csiphy->camss->dev,
+		 "CSIPHY%d set_stream: done ret=%d\n", csiphy->id, ret);
 
 	return ret;
 }

@@ -808,6 +808,10 @@ static int ispif_set_stream(struct v4l2_subdev *sd, int enable)
 	u8 cid = vc * 4; /* id of Virtual Channel and Data Type set */
 	int ret;
 
+	dev_info(camss->dev,
+		 "ISPIF set_stream: enable=%d intf=%d csid=%d vfe=%d vc=%d cid=%d\n",
+		 enable, intf, csid, vfe, vc, cid);
+
 	if (enable) {
 		if (!media_pad_remote_pad_first(&line->pads[MSM_ISPIF_PAD_SINK]))
 			return -ENOLINK;

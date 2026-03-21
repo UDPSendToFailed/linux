@@ -23,9 +23,11 @@
 #define CSIPHY_3PH_LNn_CFG4(n)			(0x00c + 0x100 * (n))
 #define CSIPHY_3PH_LNn_CFG4_T_HS_CLK_MISS	0xa4
 #define CSIPHY_3PH_LNn_CFG4_T_HS_CLK_MISS_660	0xa5
+#define CSIPHY_3PH_LNn_CFG4_T_HS_CLK_MISS_8x53	0xff
 #define CSIPHY_3PH_LNn_CFG5(n)			(0x010 + 0x100 * (n))
 #define CSIPHY_3PH_LNn_CFG5_T_HS_DTERM		0x02
 #define CSIPHY_3PH_LNn_CFG5_HS_REC_EQ_FQ_INT	0x50
+#define CSIPHY_3PH_LNn_CTRL5(n)			(0x014 + 0x100 * (n))
 #define CSIPHY_3PH_LNn_TEST_IMP(n)		(0x01c + 0x100 * (n))
 #define CSIPHY_3PH_LNn_TEST_IMP_HS_TERM_IMP	0xa
 #define CSIPHY_3PH_LNn_MISC1(n)			(0x028 + 0x100 * (n))
@@ -901,6 +903,7 @@ static void csiphy_gen1_config_lanes(struct csiphy_device *csiphy,
 				     u8 settle_cnt)
 {
 	struct csiphy_lanes_cfg *c = &cfg->csi2->lane_cfg;
+	bool is_8x53 = csiphy->camss->res->version == CAMSS_8x53;
 	int i, l = 0;
 	u8 val;
 
@@ -910,8 +913,14 @@ static void csiphy_gen1_config_lanes(struct csiphy_device *csiphy,
 		else
 			l = c->data[i].pos * 2;
 
-		val = CSIPHY_3PH_LNn_CFG1_SWI_REC_DLY_PRG;
-		val |= 0x17;
+		/*
+		 * CSIPHY v3.4.2.1 (MSM8953/SDM450) uses different register
+		 * values than v3.5 (MSM8x96) for receiver tuning.
+		 */
+		if (is_8x53)
+			val = 0x88;
+		else
+			val = CSIPHY_3PH_LNn_CFG1_SWI_REC_DLY_PRG | 0x17;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG1(l));
 
 		val = CSIPHY_3PH_LNn_CFG2_LP_REC_EN_INT;
@@ -920,42 +929,67 @@ static void csiphy_gen1_config_lanes(struct csiphy_device *csiphy,
 		val = settle_cnt;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG3(l));
 
-		val = CSIPHY_3PH_LNn_CFG5_T_HS_DTERM |
-			CSIPHY_3PH_LNn_CFG5_HS_REC_EQ_FQ_INT;
+		if (is_8x53)
+			val = 0x56;
+		else
+			val = CSIPHY_3PH_LNn_CFG5_T_HS_DTERM |
+			      CSIPHY_3PH_LNn_CFG5_HS_REC_EQ_FQ_INT;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG5(l));
 
 		val = CSIPHY_3PH_LNn_CFG6_SWI_FORCE_INIT_EXIT;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG6(l));
 
-		val = CSIPHY_3PH_LNn_CFG7_SWI_T_INIT;
+		if (is_8x53)
+			val = 0x00;
+		else
+			val = CSIPHY_3PH_LNn_CFG7_SWI_T_INIT;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG7(l));
 
 		val = CSIPHY_3PH_LNn_CFG8_SWI_SKIP_WAKEUP |
 			CSIPHY_3PH_LNn_CFG8_SKEW_FILTER_ENABLE;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG8(l));
 
-		val = CSIPHY_3PH_LNn_CFG9_SWI_T_WAKEUP;
+		if (is_8x53)
+			val = 0xFE;
+		else
+			val = CSIPHY_3PH_LNn_CFG9_SWI_T_WAKEUP;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG9(l));
 
-		val = CSIPHY_3PH_LNn_TEST_IMP_HS_TERM_IMP;
+		if (is_8x53)
+			val = 0xE7;
+		else
+			val = CSIPHY_3PH_LNn_TEST_IMP_HS_TERM_IMP;
 		writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_TEST_IMP(l));
 
 		val = CSIPHY_3PH_LNn_CSI_LANE_CTRL15_SWI_SOT_SYMBOL;
 		writel_relaxed(val, csiphy->base +
 				    CSIPHY_3PH_LNn_CSI_LANE_CTRL15(l));
+
+		if (is_8x53)
+			writel_relaxed(0x60, csiphy->base +
+					     CSIPHY_3PH_LNn_CTRL5(l));
 	}
 
-	val = CSIPHY_3PH_LNn_CFG1_SWI_REC_DLY_PRG;
+	if (is_8x53)
+		val = 0x80;
+	else
+		val = CSIPHY_3PH_LNn_CFG1_SWI_REC_DLY_PRG;
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG1(l));
 
 	if (csiphy->camss->res->version == CAMSS_660)
 		val = CSIPHY_3PH_LNn_CFG4_T_HS_CLK_MISS_660;
+	else if (is_8x53)
+		val = CSIPHY_3PH_LNn_CFG4_T_HS_CLK_MISS_8x53;
 	else
 		val = CSIPHY_3PH_LNn_CFG4_T_HS_CLK_MISS;
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_CFG4(l));
 
 	val = CSIPHY_3PH_LNn_MISC1_IS_CLKLANE;
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_LNn_MISC1(l));
+
+	/* MSM8953: clock lane CFG9 uses 0x1F instead of data lane's 0xFE */
+	if (is_8x53)
+		writel_relaxed(0x1F, csiphy->base + CSIPHY_3PH_LNn_CFG9(l));
 }
 
 static void csiphy_gen2_config_lanes(struct csiphy_device *csiphy,
@@ -1047,14 +1081,27 @@ static void csiphy_lanes_enable(struct csiphy_device *csiphy,
 	writel_relaxed(val, csiphy->base +
 		       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 7));
 
-	val = 0x00;
-	writel_relaxed(val, csiphy->base +
-		       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	/*
+	 * CSIPHY v3.4.2.1 (MSM8953/SDM450) requires CMN_CTRL0 to be
+	 * written AFTER per-lane config with value 0x02.
+	 * Other SoCs write 0x00 before per-lane config.
+	 */
+	if (csiphy->camss->res->version != CAMSS_8x53) {
+		val = 0x00;
+		writel_relaxed(val, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	}
 
 	if (csiphy_is_gen2(csiphy->camss->res->version))
 		csiphy_gen2_config_lanes(csiphy, settle_cnt);
 	else
 		csiphy_gen1_config_lanes(csiphy, cfg, settle_cnt);
+
+	if (csiphy->camss->res->version == CAMSS_8x53) {
+		val = 0x02;
+		writel_relaxed(val, csiphy->base +
+			       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
+	}
 
 	/* IRQ_MASK registers - disable all interrupts */
 	for (i = 11; i < 22; i++) {

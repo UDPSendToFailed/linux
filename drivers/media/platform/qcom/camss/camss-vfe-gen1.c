@@ -176,20 +176,35 @@ static int vfe_enable_output(struct vfe_line *line)
 	unsigned int i;
 	u16 ub_size;
 
+	dev_info(vfe->camss->dev,
+		 "VFE enable_output: line=%d\n", line->id);
+
 	ub_size = vfe->ops_gen1->get_ub_size(vfe->id);
-	if (!ub_size)
+	if (!ub_size) {
+		dev_err(vfe->camss->dev, "VFE enable_output: ub_size=0!\n");
 		return -EINVAL;
+	}
+
+	dev_info(vfe->camss->dev,
+		 "VFE enable_output: ub_size=%u\n", ub_size);
 
 	sensor_pad = camss_find_sensor_pad(&line->subdev.entity);
+	dev_info(vfe->camss->dev,
+		 "VFE enable_output: sensor_pad=%p\n", sensor_pad);
 	if (sensor_pad) {
 		struct v4l2_subdev *subdev =
 			media_entity_to_v4l2_subdev(sensor_pad->entity);
 
+		dev_info(vfe->camss->dev,
+			 "VFE enable_output: sensor=%s\n", subdev->name);
 		v4l2_subdev_call(subdev, sensor, g_skip_frames, &frame_skip);
 		/* Max frame skip is 29 frames */
 		if (frame_skip > VFE_FRAME_DROP_VAL - 1)
 			frame_skip = VFE_FRAME_DROP_VAL - 1;
 	}
+
+	dev_info(vfe->camss->dev,
+		 "VFE enable_output: frame_skip=%u\n", frame_skip);
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
@@ -275,6 +290,10 @@ static int vfe_enable_output(struct vfe_line *line)
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
+	dev_info(vfe->camss->dev,
+		 "VFE enable_output: done, line=%d output_state=%d\n",
+		 line->id, output->state);
+
 	return 0;
 }
 
@@ -340,9 +359,15 @@ int vfe_gen1_enable(struct vfe_line *line)
 	struct vfe_device *vfe = to_vfe(line);
 	int ret;
 
+	dev_info(vfe->camss->dev,
+		 "VFE gen1_enable: line=%d stream_count=%d\n",
+		 line->id, vfe->stream_count);
+
 	mutex_lock(&vfe->stream_lock);
 
 	if (!vfe->stream_count) {
+		dev_info(vfe->camss->dev,
+			 "VFE gen1_enable: first stream, enable IRQ+WR+QoS+DS\n");
 		vfe->ops_gen1->enable_irq_common(vfe);
 		vfe->ops_gen1->bus_enable_wr_if(vfe, 1);
 		vfe->ops_gen1->set_qos(vfe);
